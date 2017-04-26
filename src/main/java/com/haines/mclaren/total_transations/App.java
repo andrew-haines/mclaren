@@ -8,6 +8,7 @@ import java.nio.file.Paths;
 import com.haines.mclaren.total_transations.api.Consumer;
 import com.haines.mclaren.total_transations.api.DomainFactory;
 import com.haines.mclaren.total_transations.domain.UserEvent;
+import com.haines.mclaren.total_transations.domain.UserEvent.ImmutableUserEvent;
 import com.haines.mclaren.total_transations.domain.UserEventDeserializer;
 import com.haines.mclaren.total_transations.domain.UserTransactionDomainFactory;
 import com.haines.mclaren.total_transations.io.Feeder;
@@ -25,7 +26,7 @@ public class App implements Closeable{
 		this.consumer = consumer;
 	}
 	
-	public void process(Feeder<UserEvent> feeder) throws IOException{
+	public void process(Feeder<? extends UserEvent> feeder) throws IOException{
 		
 		while(feeder.hasNext()){
 			consumer.consume(feeder.next());
@@ -57,7 +58,7 @@ public class App implements Closeable{
 		
 		try(App app = createApp(new UserTransactionDomainFactory(numAggregatorWorkerThreads, topN, diskOutput, numInMemoryItemsPerExecutor))){
 			
-			try(Feeder<UserEvent> feeder = Feeder.FACTORY.createFileFeeder(diskInput, UserEventDeserializer.DESERIALIZER)){
+			try(Feeder<ImmutableUserEvent> feeder = Feeder.FACTORY.createFileFeeder(diskInput, UserEventDeserializer.IMMUTABLE_DESERIALIZER, true)){
 				app.process(feeder);
 			}
 		}

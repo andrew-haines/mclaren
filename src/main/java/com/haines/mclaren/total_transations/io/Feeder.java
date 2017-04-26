@@ -9,31 +9,46 @@ import java.nio.file.StandardOpenOption;
 import java.util.Iterator;
 
 import com.haines.mclaren.total_transations.api.Deserializer;
-import com.haines.mclaren.total_transations.api.Event;
 
-public interface Feeder<E extends Event<E>> extends Iterator<E>, Closeable{
+public interface Feeder<E> extends Iterator<E>, Closeable{
 
 	public static final char CSV_FIELD_DELIMITER = ',';
-	public static final char CSV_EVENT_DELIMITER = ',';
+	public static final char CSV_EVENT_DELIMITER = '\n';
 	
 	public static final Factory FACTORY = new Factory();
 	
 	public static class Factory {
 		
+		private static final int DEFAULT_BUFFER_SIZE = 204800;
+		
 		private Factory(){}
 		
-		public <E extends Event<E>> Feeder<E> createFileFeeder(Path localFile, char fieldDelimier, char eventDelimiter, Deserializer<E> deserializer) throws IOException{
+		public <E> Feeder<E> createFileFeeder(Path localFile, char fieldDelimier, char eventDelimiter, Deserializer<E> deserializer, boolean memoryMap, int bufferSize) throws IOException{
 			
 			FileChannel channel = FileChannel.open(localFile, StandardOpenOption.READ);
 			
-			ByteBuffer buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size());
+			ByteBuffer buffer;
+			if (memoryMap){
+				buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size()); // ignore the buffer size as this is mapped to whatever size the file is. 
+			} else{
+				buffer = ByteBuffer.allocate(bufferSize);
+				if (channel.read(buffer) >= bufferSize){
+					throw new RuntimeException("buffer size "+bufferSize+" was not big enough to load "+localFile);
+				}
+				buffer.flip();
+			}
 			
 			return new ByteBufferFeeder<E>(channel, buffer, fieldDelimier, eventDelimiter, deserializer);
 		}
 		
-		public <E extends Event<E>> Feeder<E> createFileFeeder(Path localFile, Deserializer<E> deserializer) throws IOException{
+		public <E> Feeder<E> createFileFeeder(Path localFile, Deserializer<E> deserializer, boolean memoryMap) throws IOException{
 			
-			return createFileFeeder(localFile, CSV_FIELD_DELIMITER, CSV_EVENT_DELIMITER, deserializer);
+			return createFileFeeder(localFile, CSV_FIELD_DELIMITER, CSV_EVENT_DELIMITER, deserializer, memoryMap, DEFAULT_BUFFER_SIZE);
+		}
+		
+		public <E> Feeder<E> createFileFeeder(Path localFile, Deserializer<E> deserializer, boolean memoryMap, int bufferSize) throws IOException{
+			
+			return createFileFeeder(localFile, CSV_FIELD_DELIMITER, CSV_EVENT_DELIMITER, deserializer, memoryMap, bufferSize);
 		}
 		
 		/**
@@ -43,7 +58,7 @@ public interface Feeder<E extends Event<E>> extends Iterator<E>, Closeable{
 		 * @author haines
 		 *
 		 */
-		private static class ByteBufferFeeder<E extends Event<E>> implements Feeder<E> {
+		private static class ByteBufferFeeder<E> implements Feeder<E> {
 
 			private final ByteBuffer buffer;
 			private final Closeable channel;

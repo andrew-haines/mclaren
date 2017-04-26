@@ -1,15 +1,10 @@
 package com.haines.mclaren.total_transations.util;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -22,6 +17,10 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
+
+import com.haines.mclaren.total_transations.io.Feeder;
+import com.haines.mclaren.total_transations.io.IOFactory;
+import com.haines.mclaren.total_transations.io.Persister;
 
 //@NotThreadSafe
 public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K>> implements SimpleMap<K, V>{
@@ -216,7 +215,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 	 * @param <K>
 	 * @param <V>
 	 */
-	static class BucketBuffers<K extends Serializable, V extends Serializable> {
+	static class BucketBuffers<K extends Serializable, V extends Keyable<K>> {
 
 		private static final Logger LOG = Logger.getLogger(BucketBuffers.class.getName());
 		
@@ -228,16 +227,17 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		private final Node head;
 		private final int maxElementsInMemoryUnit;
 		private int maxBucketId;
+		private final IOFactory<V> ioFactory;
 		
-		BucketBuffers(Path rootFolder, int maxElementsInMemoryUnit){
-			this(DEFAULT_BRANCHING_SIZE, rootFolder, maxElementsInMemoryUnit);
+		BucketBuffers(Path rootFolder, int maxElementsInMemoryUnit, IOFactory<V> ioFactory){
+			this(DEFAULT_BRANCHING_SIZE, rootFolder, maxElementsInMemoryUnit, ioFactory);
 		}
 		
 		public long getSizeOfPersistedBucket(int bucketNumber) {
 			return bucketSizes.get(bucketNumber);
 		}
 
-		private BucketBuffers(int branchingSize, Path rootFolder, int maxElementsInMemoryUnit){
+		private BucketBuffers(int branchingSize, Path rootFolder, int maxElementsInMemoryUnit, IOFactory<V> ioFactory){
 			this.bucketSizes = new HashMap<Integer, Integer>();
 			this.bucketNodes = new HashMap<Integer, Node>();
 			this.totalElements = 0;
@@ -246,6 +246,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			this.bucketSizes.put(0, 0);
 			this.maxElementsInMemoryUnit = maxElementsInMemoryUnit;
 			this.maxBucketId = 0;
+			this.ioFactory = ioFactory;
 		}
 		
 		/**
@@ -330,14 +331,12 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 				// more performant implementation could be considered that writes to a buffer but the Files.write method is very convenient and, assuming this is on the final
 				// worker thread, is not on the critical path.
 				
-				ByteArrayOutputStream byteArrayStream = new ByteArrayOutputStream();
+				try(Persister<V> persister = ioFactory.createPersister(bucketNode.fileLocation.toUri())){
 				
-				try(ObjectOutputStream out = new ObjectOutputStream(byteArrayStream)){
-					out.writeObject(bucketContents);
+					for (V item: bucketContents.values()){
+						persister.consume(item);
+					}
 				}
-				
-				Files.write(bucketNode.fileLocation, byteArrayStream.toByteArray(), StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
-				
 				int newBucketSize = bucketContents.size();
 				Integer previousBucketSize = bucketSizes.put(bucketNode.id, newBucketSize);
 				
@@ -386,21 +385,25 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			}
 		}
 		
-		private static <K extends Serializable, V extends Serializable> Map<Integer, List<Entry<K, V>>> groupIntoBuckets(Node parentNode, Collection<? extends Entry<K, V>> events, BucketBuffers<K, V> bucketBuffers) {
+		private static <K extends Serializable, V extends Keyable<K>> Map<Integer, List<Entry<K, V>>> groupIntoBuckets(Node parentNode, Collection<? extends Entry<K, V>> events, BucketBuffers<K, V> bucketBuffers) {
 			return StreamSupport.stream(events.spliterator(), false)
 					.collect(Collectors.groupingBy(e -> bucketBuffers.getBucketNumForKey(parentNode, e.getKey())));
 		}
 		
-		@SuppressWarnings("unchecked")
 		private Map<K, V> loadBucket(Path bucketFile) throws IOException, ClassNotFoundException{
 			
 			if (Files.exists(bucketFile)){
-				byte[] contents = Files.readAllBytes(bucketFile);
+				try(Feeder<V> feeder = ioFactory.createFeeder(bucketFile.toUri())){
 				
-				try(ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(contents))){
-				
-					return (Map<K, V>)in.readObject();
+					Map<K, V> contents = new HashMap<K, V>();
+					while(feeder.hasNext()){
+						V nextItem = feeder.next();
+						contents.put(nextItem.getKey(), nextItem);
+					}
+					
+					return contents;
 				}
+				
 			} else{
 				return new HashMap<K, V>();
 			}

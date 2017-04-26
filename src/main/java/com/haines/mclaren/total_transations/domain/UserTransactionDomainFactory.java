@@ -2,6 +2,7 @@ package com.haines.mclaren.total_transations.domain;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.net.URI;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -24,11 +25,29 @@ import com.haines.mclaren.total_transations.util.SimpleMap;
 import com.haines.mclaren.total_transations.api.Dispatcher;
 import com.haines.mclaren.total_transations.api.DomainFactory;
 import com.haines.mclaren.total_transations.domain.UserEvent.MutableUserEvent;
+import com.haines.mclaren.total_transations.io.Feeder;
+import com.haines.mclaren.total_transations.io.IOFactory;
 import com.haines.mclaren.total_transations.io.Persister;
 
 public class UserTransactionDomainFactory implements DomainFactory {
 	
 	private static final Logger LOG = Logger.getLogger(UserTransactionDomainFactory.class.getName());
+	
+	public static IOFactory<MutableUserEvent> createIOFactory(int bufferSize){
+		return new IOFactory<MutableUserEvent>(){
+
+			@Override
+			public Persister<MutableUserEvent> createPersister(URI uri) throws IOException {
+				return Persister.FACTORY.createCSVPersister(Paths.get(uri), UserEventSerializer.MUTABLE_SERIALIZER, false, bufferSize);
+			}
+
+			@Override
+			public Feeder<MutableUserEvent> createFeeder(URI uri) throws IOException {
+				return Feeder.FACTORY.createFileFeeder(Paths.get(uri), UserEventDeserializer.MUTABLE_DESERIALIZER, false, bufferSize);
+			}
+			
+		};
+	}
 	
 	private final int numAggregatorWorkerThreads;
 	private final int topN;
@@ -55,8 +74,8 @@ public class UserTransactionDomainFactory implements DomainFactory {
 		return ChainedConsumer.chain(createTopNConsumer(), createAggregationPersister());
 	}
 
-	public Consumer<UserEvent> createAggregationPersister() throws IOException {
-		return Persister.FACTORY.createCSVPersister(getAggregationFile(diskOutput), UserEventSerializer.SERIALIZER);
+	public Persister<UserEvent> createAggregationPersister() throws IOException {
+		return Persister.FACTORY.createCSVPersister(getAggregationFile(diskOutput), UserEventSerializer.SERIALIZER, true);
 	}
 
 	public TopNEventConsumer<UserEvent> createTopNConsumer() {
@@ -66,7 +85,7 @@ public class UserTransactionDomainFactory implements DomainFactory {
 	public Consumer<UserEvent> createInitalChainConsumer(Consumer<UserEvent> finalPathConsumer) throws IOException, ClassNotFoundException, InterruptedException {
 		
 		int totalWorkerThreads = numAggregatorWorkerThreads + 1;
-		SimpleMap<Serializable, MutableUserEvent> diskBackedStore = CollectionUtil.getFileBackedMap(createTmpMapDir(diskOutput), numInMemoryItemsPerExecutor);
+		SimpleMap<Serializable, MutableUserEvent> diskBackedStore = CollectionUtil.getFileBackedMap(createTmpMapDir(diskOutput), numInMemoryItemsPerExecutor, createIOFactory(numInMemoryItemsPerExecutor * 1024)); // 1024 bytes per item
 		
 		DirectStreamAggregatorProducer<UserEvent> finalAggregator = new DirectStreamAggregatorProducer<UserEvent>(diskBackedStore, finalPathConsumer); 
 		

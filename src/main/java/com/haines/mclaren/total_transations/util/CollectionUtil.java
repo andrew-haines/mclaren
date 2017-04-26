@@ -11,7 +11,7 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
-import com.haines.mclaren.total_transations.domain.UserEvent;
+import com.haines.mclaren.total_transations.io.IOFactory;
 import com.haines.mclaren.total_transations.io.Util;
 import com.haines.mclaren.total_transations.util.SimpleMap.Keyable;
 
@@ -63,12 +63,12 @@ public class CollectionUtil {
 	 * @throws IOException
 	 * @throws ClassNotFoundException 
 	 */
-	public static <K extends Serializable, V extends SimpleMap.Keyable<K>> DiskBackedMap<K, V> getFileBackedMap(Path localFile, int maximumInMemoryItems) throws IOException, ClassNotFoundException{
+	public static <K extends Serializable, V extends SimpleMap.Keyable<K>> DiskBackedMap<K, V> getFileBackedMap(Path localFile, int maximumInMemoryItems, IOFactory<V> ioFactory) throws IOException, ClassNotFoundException{
 		
-		return new DiskBackedMap<K, V>(createBucketBuffer(localFile, maximumInMemoryItems));
+		return new DiskBackedMap<K, V>(createBucketBuffer(localFile, maximumInMemoryItems, ioFactory));
 	}
 	
-	private static <K extends Serializable, V extends Serializable> DiskBackedMap.BucketBuffers<K, V> createBucketBuffer(Path localFile, int maxEntriesInMemoryUnit) throws IOException {
+	private static <K extends Serializable, V extends Keyable<K>> DiskBackedMap.BucketBuffers<K, V> createBucketBuffer(Path localFile, int maxEntriesInMemoryUnit, IOFactory<V> ioFactory) throws IOException {
 		
 		if(Files.exists(localFile)){
 			Util.recursiveDelete(localFile);
@@ -83,7 +83,7 @@ public class CollectionUtil {
 		
 		LOG.log(Level.INFO, "clearing down existing working directory " + localFile);
 		
-		return new DiskBackedMap.BucketBuffers<K, V>(localFile, maxEntriesInMemoryUnit);
+		return new DiskBackedMap.BucketBuffers<K, V>(localFile, maxEntriesInMemoryUnit, ioFactory);
 	}
 
 	public static <K, V extends SimpleMap.Keyable<K>> InMemorySimpleMap<K, V> getMemoryBackMap(Class<K> keyClass, Class<V> valueClass){

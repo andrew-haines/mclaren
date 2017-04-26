@@ -3,22 +3,41 @@ package com.haines.mclaren.total_transations.domain;
 import java.nio.ByteBuffer;
 
 import com.haines.mclaren.total_transations.api.Deserializer;
+import com.haines.mclaren.total_transations.domain.UserEvent.ImmutableUserEvent;
+import com.haines.mclaren.total_transations.domain.UserEvent.MutableUserEvent;
 
-public class UserEventDeserializer implements Deserializer<UserEvent>{
+public abstract class UserEventDeserializer<T extends UserEvent> implements Deserializer<T>{
 
-	public static final UserEventDeserializer DESERIALIZER = new UserEventDeserializer();
+	public static final UserEventDeserializer<ImmutableUserEvent> IMMUTABLE_DESERIALIZER = new UserEventDeserializer<ImmutableUserEvent>(){
+
+		@Override
+		protected ImmutableUserEvent createUserEvent(String username, int numTransactions) {
+			return new UserEvent.ImmutableUserEvent(username, numTransactions);
+		}
+		
+	};
+	public static final UserEventDeserializer<MutableUserEvent> MUTABLE_DESERIALIZER = new UserEventDeserializer<MutableUserEvent>(){
+
+		@Override
+		protected MutableUserEvent createUserEvent(String username, int numTransactions) {
+			return new UserEvent.MutableUserEvent(username, numTransactions);
+		}
+		
+	};
 	
 	private UserEventDeserializer(){}
 	
 	@Override
-	public UserEvent deserialise(ByteBuffer buffer, char fieldDelimiter, char eventDelimiter) {
+	public T deserialise(ByteBuffer buffer, char fieldDelimiter, char eventDelimiter) {
 		// consume from buffer until new line. We also assume there is a comer to separate the user and transaction parts
 		
 		String userName = readUserFromBuffer(buffer, fieldDelimiter);
 		int numTransactions = readTransactionsFromBuffer(buffer, eventDelimiter);
 		
-		return new UserEvent.ImmutableUserEvent(userName, numTransactions);
+		return createUserEvent(userName, numTransactions);
 	}
+	
+	protected abstract T createUserEvent(String username, int numTransactions);
 	
 	private int readTransactionsFromBuffer(ByteBuffer buffer, char delimiter) {
 		
@@ -27,7 +46,7 @@ public class UserEventDeserializer implements Deserializer<UserEvent>{
 		boolean foundDelimiter = false;
 		while(!foundDelimiter && buffer.hasRemaining()){
 			
-			char nextChar = buffer.getChar();
+			char nextChar = (char)buffer.get();
 			if (nextChar == delimiter){
 				foundDelimiter = true; // found the delimiter, do not add it to the username
 			} else if (Character.isDigit(nextChar)){ // prevents whitespace from causing issues.
@@ -45,7 +64,7 @@ public class UserEventDeserializer implements Deserializer<UserEvent>{
 		boolean foundDelimiter = false;
 		while(!foundDelimiter && buffer.hasRemaining()){
 			
-			char nextChar = buffer.getChar();
+			char nextChar = (char)buffer.get();
 			if (nextChar == delimiter){
 				foundDelimiter = true; // found the delimiter, do not add it to the username
 			} else{

@@ -8,31 +8,52 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
 import com.haines.mclaren.total_transations.api.Consumer;
-import com.haines.mclaren.total_transations.api.Event;
 import com.haines.mclaren.total_transations.api.Serializer;
 
-public interface Persister<E extends Event<E>> extends Consumer<E>{
-
+public interface Persister<E> extends Consumer<E>{
+	
 	public static final Factory FACTORY = new Factory();
 	
 	public static class Factory {
 		
+		private static final int DEFAULT_BUFFER_SIZE = 204800;
+
 		private Factory(){}
 		
-		public <E extends Event<E>> Persister<E> createCSVPersister(Path outputFile, Serializer<E> serializer) throws IOException{
-			return createDelimitedPersister(outputFile, serializer, Feeder.CSV_FIELD_DELIMITER, Feeder.CSV_EVENT_DELIMITER);
-		}
-
-		private <E extends Event<E>> Persister<E> createDelimitedPersister(Path outputFile, Serializer<E> serializer, char csvFieldDelimiter, char csvEventDelimiter) throws IOException {
-			
-			FileChannel channel = FileChannel.open(outputFile, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
-			
-			ByteBuffer buffer = channel.map(FileChannel.MapMode.READ_WRITE, 0, channel.size());
-			
-			return new DelimitedByteBufferPersister<E>(channel, buffer, csvFieldDelimiter, csvEventDelimiter, serializer);
+		public <E> Persister<E> createCSVPersister(Path outputFile, Serializer<E> serializer, boolean memoryMap) throws IOException{
+			return createDelimitedPersister(outputFile, serializer, Feeder.CSV_FIELD_DELIMITER, Feeder.CSV_EVENT_DELIMITER, memoryMap, DEFAULT_BUFFER_SIZE);
 		}
 		
-		private static class DelimitedByteBufferPersister<E extends Event<E>> implements Persister<E>{
+		public <E> Persister<E> createCSVPersister(Path outputFile, Serializer<E> serializer, boolean memoryMap, int bufferSize) throws IOException{
+			return createDelimitedPersister(outputFile, serializer, Feeder.CSV_FIELD_DELIMITER, Feeder.CSV_EVENT_DELIMITER, memoryMap, bufferSize);
+		}
+
+		private <E> Persister<E> createDelimitedPersister(Path outputFile, Serializer<E> serializer, char csvFieldDelimiter, char csvEventDelimiter, boolean memoryMap, int bufferSize) throws IOException {
+			
+			FileChannel channel = FileChannel.open(outputFile, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+			
+			ByteBuffer buffer;
+			if (memoryMap){
+				buffer = channel.map(FileChannel.MapMode.READ_WRITE, 0, bufferSize);
+			} else{
+				buffer = ByteBuffer.allocate(bufferSize);
+			}
+			
+			return new DelimitedByteBufferPersister<E>(channel, buffer, csvFieldDelimiter, csvEventDelimiter, serializer){
+				
+				@Override
+				public void close() throws IOException {
+					if (!memoryMap){ // if we are not using memory mapped buffers then write out to channel before closing
+						buffer.flip();
+						channel.write(buffer);
+					}
+					
+					super.close();
+				}
+			};
+		}
+		
+		private static class DelimitedByteBufferPersister<E> implements Persister<E>{
 
 			private final Closeable channel;
 			private final ByteBuffer buffer;

@@ -19,16 +19,19 @@ import org.junit.Test;
 
 import com.haines.mclaren.total_transations.SyntheticFeeder;
 import com.haines.mclaren.total_transations.domain.UserEvent;
+import com.haines.mclaren.total_transations.domain.UserEvent.MutableUserEvent;
+import com.haines.mclaren.total_transations.domain.UserTransactionDomainFactory;
+import com.haines.mclaren.total_transations.io.Feeder;
 import com.haines.mclaren.total_transations.io.Util;
 
 public class DiskBackedMapUnitTest {
 
 	private static final long TEST_SEED = 9456723456l;
-	private DiskBackedMap<Serializable, UserEvent> candidate;
+	private DiskBackedMap<Serializable, MutableUserEvent> candidate;
 	
 	@Before
 	public void before() throws ClassNotFoundException, IOException, URISyntaxException{
-		candidate = CollectionUtil.getFileBackedMap(getTmpLocation(), 5);
+		candidate = CollectionUtil.getFileBackedMap(getTmpLocation(), 5, UserTransactionDomainFactory.createIOFactory(6144));
 	}
 
 	private Path getTmpLocation() throws URISyntaxException, IOException {
@@ -43,20 +46,20 @@ public class DiskBackedMapUnitTest {
 	
 	@Test
 	public void given4Events_whenCallingPut_thenEventsStoredSuccessfully(){
-		for (UserEvent event: getRandomEvents(TEST_SEED, 4)){
+		for (MutableUserEvent event: getRandomEvents(TEST_SEED, 4)){
 			candidate.put(event.getAggregationValue(), event);
 		}
 		
 		assertThat(candidate.size(), is(equalTo(4l)));
 		
-		for (UserEvent event: getRandomEvents(TEST_SEED, 4)){ // seed is the same so therefore contents are also
+		for (MutableUserEvent event: getRandomEvents(TEST_SEED, 4)){ // seed is the same so therefore contents are also
 			assertThat(candidate.get(event.getKey()), is(equalTo(event)));
 		}
 	}
 	
 	@Test
 	public void given6Events_whenCallingPut_thenEventsStoredSuccessfully(){ // checks that it spill bucket into 
-		for (UserEvent event: getRandomEvents(TEST_SEED, 6)){
+		for (MutableUserEvent event: getRandomEvents(TEST_SEED, 6)){
 			candidate.put(event.getAggregationValue(), event);
 		}
 		
@@ -82,10 +85,10 @@ public class DiskBackedMapUnitTest {
 		addElementsAndCheckContentsOfMap(getRandomEvents(TEST_SEED, 25));
 	}
 	
-	private void addElementsAndCheckContentsOfMap(Iterable<UserEvent> events){
+	private void addElementsAndCheckContentsOfMap(Iterable<MutableUserEvent> events){
 		
 		long numEvents = 0;
-		for (UserEvent event: events){
+		for (MutableUserEvent event: events){
 			numEvents++;
 			System.out.println("Adding event: "+event);
 			candidate.put(event.getAggregationValue(), event);
@@ -93,7 +96,7 @@ public class DiskBackedMapUnitTest {
 		
 		assertThat(candidate.size(), is(equalTo(numEvents)));
 		
-		Map<Serializable, UserEvent> allEvents = CollectionUtil.loadAllElementsIntoMemoryMap(candidate);
+		Map<Serializable, MutableUserEvent> allEvents = CollectionUtil.loadAllElementsIntoMemoryMap(candidate);
 		
 		for (UserEvent event: events){ // seed is the same so therefore contents are also
 			assertThat(allEvents.get(event.getKey()), is(equalTo(event)));
@@ -102,12 +105,26 @@ public class DiskBackedMapUnitTest {
 		assertThat(allEvents.size(), is(equalTo((int)numEvents)));
 	}
 
-	private Iterable<UserEvent> getRandomEvents(long testSeed, int numEvents) {
-		return new Iterable<UserEvent>(){
+	private Iterable<MutableUserEvent> getRandomEvents(long testSeed, int numEvents) {
+		return new Iterable<MutableUserEvent>(){
 
 			@Override
-			public Iterator<UserEvent> iterator() {
-				return new SyntheticFeeder(numEvents, testSeed, Collections.emptyList(), 0.0, 5, SyntheticFeeder.LARGE_ALPHABET);
+			public Iterator<MutableUserEvent> iterator() {
+				@SuppressWarnings("resource") // synthetic feeder does not need closing
+				Feeder<UserEvent> delegate = new SyntheticFeeder(numEvents, testSeed, Collections.emptyList(), 0.0, 5, SyntheticFeeder.LARGE_ALPHABET);
+				
+				return new Iterator<MutableUserEvent>(){
+
+					@Override
+					public boolean hasNext() {
+						return delegate.hasNext();
+					}
+
+					@Override
+					public MutableUserEvent next() {
+						return (MutableUserEvent)delegate.next().toMutableEvent();
+					}
+				};
 			}
 			
 		};
