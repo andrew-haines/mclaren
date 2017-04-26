@@ -35,6 +35,22 @@ public abstract class UserEvent implements Event<UserEvent> {
 	public String toString(){
 		return "UserEvent{user: "+user+",numTranactions: "+getNumTransactions()+"}";
 	}
+	
+	@Override
+	public int hashCode(){
+		return user.hashCode(); // just hash on user only
+	}
+	
+	public boolean equals(Object o){
+		if (o instanceof UserEvent){
+			UserEvent other = (UserEvent)o;
+			
+			if (this.user.equals(other.user) && this.getNumTransactions() == other.getNumTransactions()){
+				return true;
+			}
+		}
+		return false;
+	}
 
 	public abstract long getNumTransactions();
 	

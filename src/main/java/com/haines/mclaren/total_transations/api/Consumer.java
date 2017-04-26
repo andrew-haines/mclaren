@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -23,12 +24,14 @@ public interface Consumer<E> extends Closeable {
 		private final BlockingQueue<E> eventsQueue;
 		private final AtomicBoolean isRunning;
 		private final AtomicReference<String> runningThreadName;
+		private final CountDownLatch started;
 		
-		public SeperateThreadConsumer(Consumer<E> actualConsumer){
+		public SeperateThreadConsumer(Consumer<E> actualConsumer, CountDownLatch started){
 			this.eventsQueue = new LinkedBlockingQueue<E>();
 			this.actualConsumer = actualConsumer;
 			this.isRunning = new AtomicBoolean(false);
 			this.runningThreadName = new AtomicReference<String>("Not set yet");
+			this.started = started;
 		}
 
 		public void run() {
@@ -39,6 +42,8 @@ public interface Consumer<E> extends Closeable {
 			LOG.log(Level.INFO, "Starting new consumer thread on "+runningThreadName.get());
 			
 			isRunning.set(true);
+			
+			started.countDown();
 			
 			while((isRunning.get() && !Thread.interrupted()) || !eventsQueue.isEmpty()){ // always purge any existing queue entries even when closed
 				

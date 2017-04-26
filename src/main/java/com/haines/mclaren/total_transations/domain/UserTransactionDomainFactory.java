@@ -5,11 +5,13 @@ import java.io.Serializable;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Stream;
 
 import com.haines.mclaren.total_transations.api.Aggregator;
@@ -26,6 +28,8 @@ import com.haines.mclaren.total_transations.io.Persister;
 
 public class UserTransactionDomainFactory implements DomainFactory {
 	
+	private static final Logger LOG = Logger.getLogger(UserTransactionDomainFactory.class.getName());
+	
 	private final int numAggregatorWorkerThreads;
 	private final int topN;
 	private final Path diskOutput;
@@ -40,7 +44,11 @@ public class UserTransactionDomainFactory implements DomainFactory {
 	
 	@Override
 	public Consumer<UserEvent> createInitalChainConsumer() throws IOException, ClassNotFoundException {
-		return createInitalChainConsumer(getDefaultFinalConsumers());
+		try {
+			return createInitalChainConsumer(getDefaultFinalConsumers());
+		} catch (InterruptedException e) {
+			throw new RuntimeException("unable to create consumer chain", e);
+		}
 	}
 	
 	public Consumer<UserEvent> getDefaultFinalConsumers() throws IOException{
@@ -55,21 +63,25 @@ public class UserTransactionDomainFactory implements DomainFactory {
 		return new TopNEventConsumer<UserEvent>(topN, UserEvent.RANKED_BY_TRANSACTIONS);
 	}
 
-	public Consumer<UserEvent> createInitalChainConsumer(Consumer<UserEvent> finalPathConsumer) throws IOException, ClassNotFoundException {
+	public Consumer<UserEvent> createInitalChainConsumer(Consumer<UserEvent> finalPathConsumer) throws IOException, ClassNotFoundException, InterruptedException {
 		
+		int totalWorkerThreads = numAggregatorWorkerThreads + 1;
 		SimpleMap<Serializable, MutableUserEvent> diskBackedStore = CollectionUtil.getFileBackedMap(createTmpMapDir(diskOutput), numInMemoryItemsPerExecutor);
 		
 		DirectStreamAggregatorProducer<UserEvent> finalAggregator = new DirectStreamAggregatorProducer<UserEvent>(diskBackedStore, finalPathConsumer); 
 		
-		SeperateThreadConsumer<Stream<UserEvent>> finalAggregatorThread = new SeperateThreadConsumer<Stream<UserEvent>>(finalAggregator);
+		CountDownLatch threadsStarted = new CountDownLatch(totalWorkerThreads);
+		
+		SeperateThreadConsumer<Stream<UserEvent>> finalAggregatorThread = new SeperateThreadConsumer<Stream<UserEvent>>(finalAggregator, threadsStarted);
 		
 		Collection<SeperateThreadConsumer<UserEvent>> concurrentConsumers = new ArrayList<SeperateThreadConsumer<UserEvent>>();
 		
 		for (int i = 0; i < numAggregatorWorkerThreads; i++){
-			concurrentConsumers.add(new SeperateThreadConsumer<UserEvent>(new Aggregator.AggregatorWindowedProducer<UserEvent>(numInMemoryItemsPerExecutor, finalAggregatorThread)));
+			LOG.log(Level.INFO, "create new consumer thread: "+i);
+			concurrentConsumers.add(new SeperateThreadConsumer<UserEvent>(new Aggregator.AggregatorWindowedProducer<UserEvent>(numInMemoryItemsPerExecutor, finalAggregatorThread), threadsStarted));
 		}
 		
-		Executor executor = Executors.newFixedThreadPool(numAggregatorWorkerThreads + 1, new ThreadFactory(){
+		Executor executor = Executors.newFixedThreadPool(totalWorkerThreads, new ThreadFactory(){
 
 			private int nextWorkerNumber = 0;
 			
@@ -84,7 +96,10 @@ public class UserTransactionDomainFactory implements DomainFactory {
 		
 		// submit all the threads
 		concurrentConsumers.stream().forEach(e -> executor.execute(e));
+		executor.execute(finalAggregatorThread);
 		
+		
+		threadsStarted.await();
 		return dispatcher;
 	}
 

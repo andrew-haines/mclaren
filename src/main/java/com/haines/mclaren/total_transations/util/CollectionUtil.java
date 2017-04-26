@@ -5,9 +5,15 @@ import java.io.Serializable;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
+
+import com.haines.mclaren.total_transations.domain.UserEvent;
 import com.haines.mclaren.total_transations.io.Util;
+import com.haines.mclaren.total_transations.util.SimpleMap.Keyable;
 
 public class CollectionUtil {
 
@@ -38,6 +44,17 @@ public class CollectionUtil {
 	}
 	
 	/**
+	 * Loads the entire simple map into a {@link java.util.Map} instance. Note that this could very easily cause OOM errors
+	 * as the {@link SimpleMap} class implementations could be ones that exceed the java heap for storage (such as 
+	 * {@link DiskBackedMap}. Should only be used for testing
+	 * @param simpleMap
+	 * @return
+	 */
+	public static <K, V extends Keyable<K>> Map<K, V> loadAllElementsIntoMemoryMap(SimpleMap<K,V> simpleMap){
+		return StreamSupport.stream(simpleMap.getAllValues().spliterator(), false).collect(Collectors.toMap(e -> e.getKey(), e -> e));
+	}
+	
+	/**
 	 * Creates a file backed map that keeps the MRU entries in memory
 	 * @param localFile
 	 * @param maximumItems
@@ -46,7 +63,7 @@ public class CollectionUtil {
 	 * @throws IOException
 	 * @throws ClassNotFoundException 
 	 */
-	public static <K extends Serializable, V extends SimpleMap.Keyable<K>> SimpleMap<K, V> getFileBackedMap(Path localFile, int maximumInMemoryItems) throws IOException, ClassNotFoundException{
+	public static <K extends Serializable, V extends SimpleMap.Keyable<K>> DiskBackedMap<K, V> getFileBackedMap(Path localFile, int maximumInMemoryItems) throws IOException, ClassNotFoundException{
 		
 		return new DiskBackedMap<K, V>(createBucketBuffer(localFile, maximumInMemoryItems));
 	}

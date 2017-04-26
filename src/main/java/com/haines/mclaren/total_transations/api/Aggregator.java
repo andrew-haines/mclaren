@@ -6,6 +6,7 @@ import java.io.Serializable;
 import java.util.function.BiFunction;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -76,6 +77,8 @@ public abstract class Aggregator<E extends Event<E>> implements Consumer<E>, Clo
 	@Override
 	public void close() throws IOException {
 		pushBufferDownStream(null);
+		
+		aggregationBuffer.close();
 	}
 	
 	public static class DirectStreamAggregatorProducer<E extends Event<E>> implements Consumer<Stream<E>>{
@@ -101,6 +104,8 @@ public abstract class Aggregator<E extends Event<E>> implements Consumer<E>, Clo
 			StreamSupport.stream(aggregationBuffer.getAllValues().spliterator(), false)
 							.map(e -> e.toImmutableEvent()) // convert to immutable version for visibility
 							.forEach(e -> downStreamConsumer.consume(e));
+			
+			downStreamConsumer.close();
 		}
 
 		@SuppressWarnings("unchecked")
@@ -114,7 +119,7 @@ public abstract class Aggregator<E extends Event<E>> implements Consumer<E>, Clo
 			*/
 			int[] updateCounts = aggregationBuffer.putAllEvents(mappedStream).map(e -> e == null?new int[]{1,0}:new int[]{0,1}).reduce((e1, e2) -> new int[]{e1[0] + e2[0], e1[1] + e2[1]}).get(); 
 			
-			LOG.log(Level.FINE, "Out of "+updateCounts[0]+updateCounts[1]+" total events, "+updateCounts[0]+" were new and "+updateCounts[1]+" were aggregated");
+			LOG.log(Level.INFO, "Out of "+(updateCounts[0]+updateCounts[1])+" total events, "+updateCounts[0]+" were new and "+updateCounts[1]+" were aggregated");
 			return true;
 		}
 	}
@@ -143,9 +148,22 @@ public abstract class Aggregator<E extends Event<E>> implements Consumer<E>, Clo
 		protected void pushBufferDownStream(E event) {
 			LOG.log(Level.INFO, "pushing buffer of "+aggregationBuffer.size()+" entries downstream");
 			downStreamConsumer.consume(aggregationBuffer.values().stream()
-			  	.map(e -> e.toImmutableEvent()));// map to immutable version to ensure memory visibility as we will be handing off to another thread.
+					/*
+					 * map to immutable version to ensure memory visibility as we will be handing off to another thread. 
+					 * Also specificly do a collect to copy the buffer. This will prevent concurrent modification
+					 * exceptions as it is handed off to the reducer thread.
+					 * 
+					 */
+			  	.map(e -> e.toImmutableEvent()).collect(Collectors.toList()).stream());
 
 			aggregationBuffer.clear(); // reset buffer
+		}
+
+		@Override
+		public void close() throws IOException {
+			super.close();
+			
+			downStreamConsumer.close();
 		}
 	}
 }

@@ -1,11 +1,11 @@
 package com.haines.mclaren.total_transations.util;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -17,12 +17,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.function.BiFunction;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-
-import com.haines.mclaren.total_transations.io.ByteBufferInputStream;
-import com.haines.mclaren.total_transations.io.ByteBufferOutputStream;
 
 //@NotThreadSafe
 public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K>> implements SimpleMap<K, V>{
@@ -37,40 +36,62 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		this.loadedBucketNumber = 0;
 	}
 	
-	private void loadBucket(int bucketNum) throws IOException, ClassNotFoundException {
+	private void loadBucket(int bucketNum, boolean saveCurrentBucket) throws IOException, ClassNotFoundException {
 		
-		// save the current bucket
-		
-		bucketBuffers.saveBucket(loadedBucketNumber, currentlyLoadedBucket);
-		
-		// load the required bucket
-		currentlyLoadedBucket = bucketBuffers.loadBucket(bucketNum);
-		
-		loadedBucketNumber = bucketNum;
+		if (bucketNum != loadedBucketNumber){
+			// save the current bucket
+			
+			if (saveCurrentBucket){
+				// Note, this might cause the structure of the tree to differ but only under the currentlyLoadedBucket number.
+				// as we know that bucketNum != currentlyLoadedBucket and that loaded buckets have to be leaf nodes, we do not need to rehash the key to an appropriate bucket
+				bucketBuffers.saveBucket(loadedBucketNumber, currentlyLoadedBucket); 
+			}
+			
+			// load the required bucket
+			currentlyLoadedBucket = bucketBuffers.loadBucket(bucketNum);
+			
+			loadedBucketNumber = bucketNum;
+		}
 	}
 
 	@Override
 	public V get(K key) {
-		loadBucketForKey(key);
+		loadBucketForKey(key, false);
 		
 		return currentlyLoadedBucket.get(key);
 	}
 
-	private void loadBucketForKey(K key) {
+	private void loadBucketForKey(K key, boolean forInsertion) {
 		int bucketNumber = bucketBuffers.getBucketNumForKey(key);
 		
 		if (bucketNumber != loadedBucketNumber){
 			try {
-				loadBucket(bucketNumber);
+				loadBucket(bucketNumber, true);
 			} catch (ClassNotFoundException | IOException e) {
 				throw new RuntimeException("unable to load bucket: "+bucketNumber, e);
+			}
+		} else if (forInsertion){
+			// check that the current loaded bucket exceeded the maximum item loaded limit
+			
+			if (!bucketBuffers.checkBufferHasCapacity(currentlyLoadedBucket)){
+				// save the current bucket which will write a new restructured version to disk
+				
+				try {
+					bucketBuffers.saveBucket(loadedBucketNumber, currentlyLoadedBucket);
+					
+					// now we have reordered the structure at this node, reload the buffer that this key should now be inserted into.
+					
+					loadBucket(bucketBuffers.getBucketNumForKey(key), false);
+				} catch (IOException | ClassNotFoundException e) {
+					throw new RuntimeException("Unable to write key "+key+" to store", e);
+				}
 			}
 		}
 	}
 
 	@Override
 	public V put(K key, V value) {
-		loadBucketForKey(key);
+		loadBucketForKey(key, true);
 		
 		return currentlyLoadedBucket.put(key, value);
 	}
@@ -87,10 +108,15 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 	@Override
 	public Iterable<V> getAllValues(){
 		
+		int startingBucketLoadedNum = loadedBucketNumber;
 		// manually constructing the iterable for all elements as the Stream based implementation is painful to follow.
 		return new Iterable<V>(){ 
 
-			private Iterator<Integer> nodeIdIt = bucketBuffers.bucketNodes.keySet().iterator();
+			// only consider the leaf nodes
+			private Iterator<Integer> nodeIdIt = bucketBuffers.bucketNodes.entrySet().stream()
+																						.filter(e -> e.getValue().isLeaf() && e.getKey() != startingBucketLoadedNum && Files.exists(e.getValue().fileLocation)) // filter out non-leaves, our starting bucket, and nodes that have no content
+																						.map(e -> e.getKey())
+																						.iterator();
 			private Iterator<V> currentIt = currentlyLoadedBucket.values().iterator();
 			
 			@Override
@@ -142,11 +168,16 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		 *  Unfortunately we can't combine this with the next stream based command as we need to first pass
 		 *  over the items in order to group them by their appropriate bucket ids. This is a small price to pay
 		 *  to avoid potentially making big IO pulls for each event.
+		 *  
+		 *  TODO When used with insertion routines like putAllEvents, the bucket numbers may change for each element mid way through the iteration. 
+		 *  This grouping by bucket number therefore will be invalidated. When this happens we should re-evaluate the ordering of the
+		 *  remaining elements in the stream to cater for this change. This is a further optimization
 		 */
 		Map<Integer, List<V>> buckets = groupIntoBuckets(events, bucketBuffers);
 		
 		return buckets.values().stream()
-				.flatMap(be -> be.stream()
+				.flatMap(be -> be.stream() // performs the flat mapping to ensure that all elements of bucket 1 come first, then say bucket 3, then bucket 2, etc.
+										   // the ordering of bucket evaluation isnt important. What is is that the elements are grouped by their relevant buckets.
 									.map(e -> reduceFunction.apply(e, get(e.getKey())))
 				);
 	}
@@ -187,6 +218,8 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 	 */
 	static class BucketBuffers<K extends Serializable, V extends Serializable> {
 
+		private static final Logger LOG = Logger.getLogger(BucketBuffers.class.getName());
+		
 		private final static int DEFAULT_BRANCHING_SIZE = 8;
 		
 		private long totalElements; // unlikely to need more than 32 bits (2B items) but is this is big data distributed over many many nodes, this is very possible
@@ -200,9 +233,8 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			this(DEFAULT_BRANCHING_SIZE, rootFolder, maxElementsInMemoryUnit);
 		}
 		
-		public long getSizeOfPersistedBucket(int loadedBucketNumber) {
-			// TODO Auto-generated method stub
-			return 0;
+		public long getSizeOfPersistedBucket(int bucketNumber) {
+			return bucketSizes.get(bucketNumber);
 		}
 
 		private BucketBuffers(int branchingSize, Path rootFolder, int maxElementsInMemoryUnit){
@@ -210,6 +242,8 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			this.bucketNodes = new HashMap<Integer, Node>();
 			this.totalElements = 0;
 			this.head = new Node(0, branchingSize, createNewNodeFile(0, rootFolder), 0);
+			this.bucketNodes.put(0, head);
+			this.bucketSizes.put(0, 0);
 			this.maxElementsInMemoryUnit = maxElementsInMemoryUnit;
 			this.maxBucketId = 0;
 		}
@@ -236,26 +270,29 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		private static String getFileName(int idNumber) {
 			return idNumber+".dat";
 		}
+		
+		private boolean checkBufferHasCapacity(Map<K, V> buffer){
+			return buffer.size() < maxElementsInMemoryUnit;
+		}
 
 		public int getBucketNumForKey(K key){
 			return getBucketNumForKey(head, key);
 		}
 		
 		public int getBucketNumForKey(Node node, K key){
-			if (head.getNumChildren() == 0){
+			if (node.isLeaf()){
 				// we have a terminal node which is a memory unit.
 				
-				return head.id;
+				return node.id;
 			} else{
-				// This is a branching node, re hash this again based a prime distributed depth and recurse
+				// This is a branching node, re hash this again based a its natural hash shifted to the right by the depth of the node and recurse. If we didnt bit shift then all
+				// nested buckets would hash to the same entry.
 				
-				int newHash = 31 * head.depth + key.hashCode();
+				int newHash = key.hashCode() >> node.depth;
 				
-				int branchBucket = newHash % head.getNumChildren();
+				int branchBucket = Math.abs(newHash % node.getNumChildren());
 				
-				return getBucketNumForKey(head.getChild(branchBucket), key);
-				
-				
+				return getBucketNumForKey(node.getChild(branchBucket), key);
 			}
 		}
 		
@@ -281,36 +318,44 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 
 		public void saveBucket(int loadedBucketNumber, Map<K, V> currentlyLoadedBucket) throws IOException {
 			saveBucket(getBucketNode(loadedBucketNumber), currentlyLoadedBucket);
-			
-			// update bucket sizes
-			
-			int newBucketSize = currentlyLoadedBucket.size();
-			
-			Integer previousBucketSize = bucketSizes.put(loadedBucketNumber, newBucketSize);
-			
-			if (previousBucketSize != null){
-				totalElements -= previousBucketSize;
-			}
-			
-			totalElements += newBucketSize;
 		}
 		
 		private void saveBucket(Node bucketNode, Map<K, V> bucketContents) throws IOException{
 			
 			if (bucketContents.size() < maxElementsInMemoryUnit){ // just persist to the current node as a memory file.
-				FileChannel channel = FileChannel.open(bucketNode.fileLocation, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 				
-				ByteBuffer buffer = channel.map(FileChannel.MapMode.READ_WRITE, 0, channel.size());
+				LOG.log(Level.INFO, "saving bucket of "+bucketContents.size()+" to existing storage unit at node: id: "+bucketNode.id+" - "+bucketNode.fileLocation);
 				
-				try(ObjectOutputStream out = new ObjectOutputStream(new ByteBufferOutputStream(buffer))){
+				// as these are relatively small files it's more performant to just use byte[] buffers rather than mapped byte buffers. This is synchronized however so a
+				// more performant implementation could be considered that writes to a buffer but the Files.write method is very convenient and, assuming this is on the final
+				// worker thread, is not on the critical path.
+				
+				ByteArrayOutputStream byteArrayStream = new ByteArrayOutputStream();
+				
+				try(ObjectOutputStream out = new ObjectOutputStream(byteArrayStream)){
 					out.writeObject(bucketContents);
 				}
+				
+				Files.write(bucketNode.fileLocation, byteArrayStream.toByteArray(), StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+				
+				int newBucketSize = bucketContents.size();
+				Integer previousBucketSize = bucketSizes.put(bucketNode.id, newBucketSize);
+				
+				if (previousBucketSize != null){
+					totalElements -= previousBucketSize;
+				}
+				
+				totalElements += newBucketSize;
+				
 			} else {
+				
+				LOG.log(Level.INFO, "current bucket is too big with "+bucketContents.size()+" items. Rebranching at node: id: "+bucketNode.id+" - "+bucketNode.fileLocation);
 				
 				// the bucket memory unit has got too big. promote to branching node and add the contents of
 				// the memory node to data across the 
 				
 				maxBucketId = bucketNode.promoteToBranchNode(maxBucketId);
+				bucketSizes.put(bucketNode.id, 0); // this bucket no longer contains any elements
 				
 				// add into the node cache
 				
@@ -332,7 +377,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 				buckets.entrySet().stream()
 					.forEach(be -> {
 						try {
-							saveBucket(bucketNode.getChild(be.getKey()), be.getValue().stream()
+							saveBucket(this.getBucketNode(be.getKey()), be.getValue().stream()
 																					  .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue())));
 						} catch (IOException e1) {
 							throw new RuntimeException("Unable to save bucket branch : "+be.getKey()+" from node: "+bucketNode, e1);
@@ -349,13 +394,15 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		@SuppressWarnings("unchecked")
 		private Map<K, V> loadBucket(Path bucketFile) throws IOException, ClassNotFoundException{
 			
-			FileChannel channel = FileChannel.open(bucketFile, StandardOpenOption.READ);
-			
-			ByteBuffer buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size());
-			
-			try(ObjectInputStream in = new ObjectInputStream(new ByteBufferInputStream(buffer))){
-			
-				return (Map<K, V>)in.readObject();
+			if (Files.exists(bucketFile)){
+				byte[] contents = Files.readAllBytes(bucketFile);
+				
+				try(ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(contents))){
+				
+					return (Map<K, V>)in.readObject();
+				}
+			} else{
+				return new HashMap<K, V>();
 			}
 		}
 		
@@ -381,8 +428,12 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 				this.depth = depth;
 			}
 
+			public boolean isLeaf() {
+				return numChildren == 0;
+			}
+
 			public Node getChild(int branchBucket) {
-				assert numChildren > 0;
+				assert !isLeaf();
 				
 				return children[branchBucket];
 			}
@@ -392,20 +443,22 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			}
 			
 			public int promoteToBranchNode(int maxId) throws IOException{
-				assert numChildren == 0;
+				assert isLeaf();
 				numChildren = children.length;
 				
 				// delete the existing file and change it to a directory. This file will be loaded in memory already
 				
-				Files.delete(fileLocation);
+				Files.deleteIfExists(fileLocation);
 				Files.createDirectory(fileLocation);
 				
 				int newDepth = depth + 1;
 				
 				for (int i = 0; i < children.length; i++){
-					maxId += i;
+					maxId++;
 					
 					children[i] = new Node(maxId, children.length, BucketBuffers.createNewNodeFile(maxId, fileLocation), newDepth);
+					
+					LOG.log(Level.INFO, "creating new file "+children[i].fileLocation+" for bucket"+children[i] .id);
 				}
 				
 				return maxId;

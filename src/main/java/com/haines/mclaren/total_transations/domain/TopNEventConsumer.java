@@ -3,6 +3,7 @@ package com.haines.mclaren.total_transations.domain;
 import java.io.IOException;
 import java.util.Comparator;
 import java.util.TreeSet;
+import java.util.concurrent.CountDownLatch;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -22,10 +23,12 @@ public class TopNEventConsumer<T extends Event<T>> implements Consumer<T>{
 	
 	private final TreeSet<T> bestAggregatedEvents;
 	private final int n;
+	private final CountDownLatch finished;
 	
 	public TopNEventConsumer(int n, Comparator<T> ordering){
 		this.bestAggregatedEvents = new TreeSet<T>(ordering);
 		this.n = n;
+		this.finished = new CountDownLatch(1);
 	}
 
 	@Override
@@ -36,7 +39,7 @@ public class TopNEventConsumer<T extends Event<T>> implements Consumer<T>{
 		for (T event: bestAggregatedEvents){
 			LOG.log(Level.INFO, "{}. {} - {}", new Object[]{i++, event.getAggregationValue(), event.toString()});
 		}
-		
+		finished.countDown();
 	}
 
 	@Override
@@ -50,7 +53,13 @@ public class TopNEventConsumer<T extends Event<T>> implements Consumer<T>{
 		return false;
 	}
 	
-	public Iterable<T> getBestNEvents(){
+	/**
+	 * Blocks and waits until this is finished and returns the best n events.
+	 * @return
+	 * @throws InterruptedException
+	 */
+	public Iterable<T> waitAndGetBestNEvents() throws InterruptedException{
+		finished.await();
 		return bestAggregatedEvents;
 	}
 }
