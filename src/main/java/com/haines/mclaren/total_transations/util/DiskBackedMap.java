@@ -219,7 +219,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 
 		private static final Logger LOG = Logger.getLogger(BucketBuffers.class.getName());
 		
-		private final static int DEFAULT_BRANCHING_SIZE = 8;
+		private final static int DEFAULT_BRANCHING_SIZE = 11; // make this a prime as it helps with distributing the nested buckets based on their hashes
 		
 		private long totalElements; // unlikely to need more than 32 bits (2B items) but is this is big data distributed over many many nodes, this is very possible
 		private final Map<Integer, Integer> bucketSizes;
@@ -233,8 +233,14 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			this(DEFAULT_BRANCHING_SIZE, rootFolder, maxElementsInMemoryUnit, ioFactory);
 		}
 		
-		public long getSizeOfPersistedBucket(int bucketNumber) {
-			return bucketSizes.get(bucketNumber);
+		public int getSizeOfPersistedBucket(int bucketNumber) {
+			Integer persistedBucketSize = bucketSizes.get(bucketNumber);
+			
+			if (persistedBucketSize == null){
+				persistedBucketSize = 0;
+			}
+			
+			return persistedBucketSize;
 		}
 
 		private BucketBuffers(int branchingSize, Path rootFolder, int maxElementsInMemoryUnit, IOFactory<V> ioFactory){
@@ -277,19 +283,20 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		}
 
 		public int getBucketNumForKey(K key){
-			return getBucketNumForKey(head, key);
+			return BucketBuffers.getBucketNumForKey(head, key);
 		}
 		
-		public int getBucketNumForKey(Node node, K key){
+		public static <K> int getBucketNumForKey(Node node, K key){
 			if (node.isLeaf()){
 				// we have a terminal node which is a memory unit.
 				
 				return node.id;
 			} else{
-				// This is a branching node, re hash this again based a its natural hash shifted to the right by the depth of the node and recurse. If we didnt bit shift then all
-				// nested buckets would hash to the same entry.
+				// This is a branching node, re hash this again based the natural hash shifted to the right by the depth of the node and AND-ed with 0xF mask shifted to the left and recurse. 
+				// Think of this as a sliding window of 8 bits across the hash shifted back to where it was. If we didnt bit shift then all
+				// nested buckets would hash to the same entry. Note that this limits us to 32 depths before things start going to 0 but 
 				
-				int newHash = key.hashCode() >> node.depth;
+				int newHash = (key.hashCode() & (0xF << node.depth)) >> node.depth;
 				
 				int branchBucket = Math.abs(newHash % node.getNumChildren());
 				
@@ -348,6 +355,11 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 				
 			} else {
 				
+				Integer previousBucketSize = bucketSizes.get(bucketNode.id);
+				if (previousBucketSize != null){
+					totalElements -= previousBucketSize; // these contents will be re-added in after the redistribution
+				}
+				
 				LOG.log(Level.INFO, "current bucket is too big with "+bucketContents.size()+" items. Rebranching at node: id: "+bucketNode.id+" - "+bucketNode.fileLocation);
 				
 				// the bucket memory unit has got too big. promote to branching node and add the contents of
@@ -387,7 +399,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 		
 		private static <K extends Serializable, V extends Keyable<K>> Map<Integer, List<Entry<K, V>>> groupIntoBuckets(Node parentNode, Collection<? extends Entry<K, V>> events, BucketBuffers<K, V> bucketBuffers) {
 			return StreamSupport.stream(events.spliterator(), false)
-					.collect(Collectors.groupingBy(e -> bucketBuffers.getBucketNumForKey(parentNode, e.getKey())));
+					.collect(Collectors.groupingBy(e -> BucketBuffers.getBucketNumForKey(parentNode, e.getKey())));
 		}
 		
 		private Map<K, V> loadBucket(Path bucketFile) throws IOException, ClassNotFoundException{
@@ -409,7 +421,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			}
 		}
 		
-		private static class Node {
+		static class Node {
 			
 			private final int id;
 			private final Node[] children;
@@ -417,7 +429,7 @@ public class DiskBackedMap<K extends Serializable, V extends SimpleMap.Keyable<K
 			private final Path fileLocation;
 			private final int depth;
 			
-			private Node(int id, int branchingSize, Path fileLocation, int depth){
+			Node(int id, int branchingSize, Path fileLocation, int depth){
 				
 				assert id >= 0;
 				assert branchingSize > 0;

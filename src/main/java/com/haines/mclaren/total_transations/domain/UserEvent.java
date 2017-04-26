@@ -11,7 +11,7 @@ public abstract class UserEvent implements Event<UserEvent> {
 
 		@Override
 		public int compare(UserEvent o1, UserEvent o2) {
-			return Long.compare(o1.getNumTransactions(),  o2.getNumTransactions());
+			return Long.compare(o2.getNumTransactions(),  o1.getNumTransactions());
 		}
 	};
 	

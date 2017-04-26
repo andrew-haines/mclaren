@@ -1,4 +1,4 @@
-package com.haines.mclaren.total_transations.domain;
+package com.haines.mclaren.total_transations.api;
 
 import java.io.IOException;
 import java.util.Comparator;
@@ -37,7 +37,7 @@ public class TopNEventConsumer<T extends Event<T>> implements Consumer<T>{
 		
 		int i = 0;
 		for (T event: bestAggregatedEvents){
-			LOG.log(Level.INFO, "{}. {} - {}", new Object[]{i++, event.getAggregationValue(), event.toString()});
+			LOG.log(Level.INFO, (i++)+". "+ event.getAggregationValue()+" - "+event.toString());
 		}
 		finished.countDown();
 	}
@@ -48,7 +48,7 @@ public class TopNEventConsumer<T extends Event<T>> implements Consumer<T>{
 		bestAggregatedEvents.add(e);
 		
 		if (bestAggregatedEvents.size() > n){
-			bestAggregatedEvents.remove(bestAggregatedEvents.first()); // remove the lowest value.
+			bestAggregatedEvents.remove(bestAggregatedEvents.last()); // remove the lowest value.
 		}
 		return false;
 	}

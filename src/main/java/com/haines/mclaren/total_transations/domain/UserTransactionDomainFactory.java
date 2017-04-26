@@ -24,6 +24,7 @@ import com.haines.mclaren.total_transations.util.CollectionUtil;
 import com.haines.mclaren.total_transations.util.SimpleMap;
 import com.haines.mclaren.total_transations.api.Dispatcher;
 import com.haines.mclaren.total_transations.api.DomainFactory;
+import com.haines.mclaren.total_transations.api.TopNEventConsumer;
 import com.haines.mclaren.total_transations.domain.UserEvent.MutableUserEvent;
 import com.haines.mclaren.total_transations.io.Feeder;
 import com.haines.mclaren.total_transations.io.IOFactory;
@@ -91,13 +92,13 @@ public class UserTransactionDomainFactory implements DomainFactory {
 		
 		CountDownLatch threadsStarted = new CountDownLatch(totalWorkerThreads);
 		
-		SeperateThreadConsumer<Stream<UserEvent>> finalAggregatorThread = new SeperateThreadConsumer<Stream<UserEvent>>(finalAggregator, threadsStarted);
+		SeperateThreadConsumer<Stream<UserEvent>> finalAggregatorThread = new SeperateThreadConsumer<Stream<UserEvent>>(finalAggregator, threadsStarted, numInMemoryItemsPerExecutor);
 		
 		Collection<SeperateThreadConsumer<UserEvent>> concurrentConsumers = new ArrayList<SeperateThreadConsumer<UserEvent>>();
 		
 		for (int i = 0; i < numAggregatorWorkerThreads; i++){
 			LOG.log(Level.INFO, "create new consumer thread: "+i);
-			concurrentConsumers.add(new SeperateThreadConsumer<UserEvent>(new Aggregator.AggregatorWindowedProducer<UserEvent>(numInMemoryItemsPerExecutor, finalAggregatorThread), threadsStarted));
+			concurrentConsumers.add(new SeperateThreadConsumer<UserEvent>(new Aggregator.AggregatorWindowedProducer<UserEvent>(numInMemoryItemsPerExecutor, finalAggregatorThread), threadsStarted, numInMemoryItemsPerExecutor));
 		}
 		
 		Executor executor = Executors.newFixedThreadPool(totalWorkerThreads, new ThreadFactory(){

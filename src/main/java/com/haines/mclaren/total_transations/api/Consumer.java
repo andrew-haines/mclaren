@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
@@ -26,8 +27,8 @@ public interface Consumer<E> extends Closeable {
 		private final AtomicReference<String> runningThreadName;
 		private final CountDownLatch started;
 		
-		public SeperateThreadConsumer(Consumer<E> actualConsumer, CountDownLatch started){
-			this.eventsQueue = new LinkedBlockingQueue<E>();
+		public SeperateThreadConsumer(Consumer<E> actualConsumer, CountDownLatch started, int maximumItemsForQueue){
+			this.eventsQueue = new LinkedBlockingQueue<E>(maximumItemsForQueue);
 			this.actualConsumer = actualConsumer;
 			this.isRunning = new AtomicBoolean(false);
 			this.runningThreadName = new AtomicReference<String>("Not set yet");
@@ -61,8 +62,10 @@ public interface Consumer<E> extends Closeable {
 
 		private void processQueue(){
 			try{
-				E event = eventsQueue.take();
-				actualConsumer.consume(event);
+				E event = eventsQueue.poll(1, TimeUnit.SECONDS);
+				if (event != null){
+					actualConsumer.consume(event);
+				}
 			} catch (InterruptedException e){
 				Thread.currentThread().interrupt();
 				LOG.log(Level.INFO, "Thread {} interrupted", runningThreadName.get());
@@ -82,7 +85,7 @@ public interface Consumer<E> extends Closeable {
 
 		@Override
 		public void close() throws IOException {
-			isRunning.set(true);
+			isRunning.set(false);
 			
 			// dont close the actual consumer here, do so on the running thread as this has ownership
 		}
